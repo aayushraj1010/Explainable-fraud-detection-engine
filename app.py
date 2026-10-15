@@ -1,10 +1,26 @@
+import joblib
+import numpy as np
 import pandas as pd
-import requests
 import streamlit as st
 
-st.set_page_config(page_title="Explainable Fraud Engine", layout="wide")
+# Page Configuration
+st.set_page_config(
+    page_title="Explainable Fraud Engine",
+    page_icon="🛡️",
+    layout="wide",
+)
+
+# Load Model and SHAP Explainer directly
+@st.cache_resource
+def load_artifacts():
+    model = joblib.load("fraud_model.pkl")
+    explainer = joblib.load("shap_explainer.pkl")
+    return model, explainer
+
+model, explainer = load_artifacts()
+
 st.title("🛡️ Real-Time Explainable Fraud Detection Engine")
-st.caption("Powered by LightGBM + SHAP TreeExplainer + FastAPI")
+st.caption("Powered by LightGBM + SHAP TreeExplainer (Cloud Edition)")
 
 col1, col2 = st.columns([1, 1.5])
 
@@ -23,27 +39,32 @@ with col1:
 with col2:
     st.subheader("Live AI Decision & SHAP Explainability")
     if analyze_btn:
-        payload = {
-            "amt_ratio_30d": amt_ratio,
-            "tx_velocity_1hr": velocity,
-            "distance_km": distance,
-            "is_late_night": late_night,
-        }
+        # Construct feature array
+        input_data = pd.DataFrame([[amt_ratio, velocity, distance, late_night]], 
+                                  columns=["amt_ratio_30d", "tx_velocity_1hr", "distance_km", "is_late_night"])
         
-        try:
-            res = requests.post("http://127.0.0.1:8000/predict", json=payload).json()
+        # Predict probability
+        fraud_prob = float(model.predict_proba(input_data)[0][1])
+        status = "🚨 BLOCKED (FRAUD)" if fraud_prob > 0.5 else "✅ APPROVED"
+        
+        # Calculate SHAP values
+        shap_values = explainer(input_data)
+        # Extract shap values for the positive class
+        if len(shap_values.values.shape) == 3:
+            s_vals = shap_values.values[0, :, 1]
+        else:
+            s_vals = shap_values.values[0]
 
-            m1, m2, m3 = st.columns(3)
-            m1.metric("Decision", res["status"])
-            m2.metric("Fraud Probability", f"{res['fraud_probability'] * 100:.1f}%")
-            m3.metric("Inference Latency", f"{res['latency_ms']} ms")
+        m1, m2 = st.columns(2)
+        m1.metric("Decision", status)
+        m2.metric("Fraud Probability", f"{fraud_prob * 100:.1f}%")
 
-            st.write("### Why did the AI make this decision? (SHAP Impact)")
-            st.caption("Positive bars push the transaction toward FRAUD. Negative bars push toward SAFE.")
-            shap_df = pd.DataFrame.from_dict(
-                res["shap_explanations"], orient="index", columns=["SHAP Risk Impact"]
-            )
-            st.bar_chart(shap_df)
-            
-        except requests.exceptions.ConnectionError:
-            st.error("Could not connect to the FastAPI server! Make sure your first terminal is running `uvicorn api:app --reload`.")
+        st.write("### Why did the AI make this decision? (SHAP Impact)")
+        st.caption("Positive bars push the transaction toward FRAUD. Negative bars push toward SAFE.")
+        
+        shap_df = pd.DataFrame({
+            "Feature": input_data.columns,
+            "SHAP Risk Impact": s_vals
+        }).set_index("Feature")
+        
+        st.bar_chart(shap_df)
